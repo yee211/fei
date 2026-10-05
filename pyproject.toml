@@ -1,0 +1,19 @@
+[project]
+name = "fei"
+version = "0.1.0"
+description = "轻量终端 agent harness：模型循环 + 工具 + 会话"
+requires-python = ">=3.10"
+dependencies = ["openai>=1.40"]
+
+[project.optional-dependencies]
+mcp = ["mcp>=1.30,<2", "jsonschema>=4.23,<5"]
+
+[project.scripts]
+fei = "fei.cli:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["fei", "fei.tools"]

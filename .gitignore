@@ -1,0 +1,18 @@
+__pycache__/
+*.egg-info/
+.venv/
+.env
+
+# Local IDE and agent runtime artifacts
+.idea/
+.vscode/
+.fei-backups/
+.fei-changes/
+.fei-results/
+work/
+.fei.json
+.fei-mcp.json
+.env.*
+!.env.example
+*.log
+.pytest_cache/

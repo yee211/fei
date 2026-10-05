@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "servers": {
+    "readonly": {
+      "transport": "stdio",
+      "command": "{python}",
+      "args": ["examples/readonly_mcp.py"],
+      "timeout": 30
+    }
+  }
+}

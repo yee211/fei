@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "checks": {
+    "test": {
+      "category": "test",
+      "argv": ["{python}", "-B", "-m", "unittest", "discover", "-s", "tests", "-p", "test_*.py", "-v"],
+      "timeout": 120
+    }
+  }
+}
