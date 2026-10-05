@@ -23,7 +23,8 @@ def split_for_compact(messages: list):
 
     只有第一个任务之外还有完整旧任务时才需要压缩，否则返回 None。
     """
-    system = [m for m in messages if m.get("role") == "system"]
+    from fei.state_messages import compact_system_messages
+    system = compact_system_messages(messages)
     rest = [m for m in messages if m.get("role") != "system"]
     idx = _last_task_start(rest)
     old, recent = rest[:idx], rest[idx:]
@@ -111,7 +112,8 @@ def complete_blocks(messages):
 
 def compact_running(client, messages: list, keep_blocks: int = 2) -> list:
     """Keep original current user request plus the latest complete tool blocks."""
-    system = [m for m in messages if m.get("role") == "system"]
+    from fei.state_messages import compact_system_messages
+    system = compact_system_messages(messages)
     rest = [m for m in messages if m.get("role") != "system"]
     complete_blocks(rest)  # Validate before any model request or mutation.
     start = _last_task_start(rest)
@@ -134,6 +136,11 @@ def compact_running(client, messages: list, keep_blocks: int = 2) -> list:
         from fei.task_state import current_task
         for attempt in range(2):
             started = perf_counter()
+            from fei.runtime_limits import current_budget
+            shared_budget = current_budget.get()
+            request_estimate = len(transcript[offset:offset + chunk_size].encode("utf-8")) + len(memo.encode("utf-8")) + len(str(goal.get("content", ""))[:4000].encode("utf-8")) + 2048
+            if shared_budget is not None:
+                shared_budget.before_request(request_estimate,4096 if attempt == 0 else 8192)
             response = client.chat.completions.create(
                     model=MODEL, max_tokens=4096 if attempt == 0 else 8192,
                 messages=[
@@ -147,6 +154,8 @@ def compact_running(client, messages: list, keep_blocks: int = 2) -> list:
                 ],
             )
             usage = getattr(response, "usage", None)
+            if shared_budget is not None:
+                shared_budget.record(usage,request_estimate,response.choices[0].message.content or "")
             active_task = current_task.get()
             if active_task is not None and active_task.summary_callback:
                 active_task.summary_callback({"elapsed": perf_counter() - started,

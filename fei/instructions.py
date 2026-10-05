@@ -35,14 +35,17 @@ class ProjectInstructions:
             if previous is None or previous[0] != signature:
                 self.cache[path] = (signature, path.read_text(encoding="utf-8-sig"))
             pieces.append(f"Source: {path}\nScope: {folder} and descendants; more specific directory rules apply within their scope.\n{self.cache[path][1]}")
-        content = MARKER + "\nThese are project conventions, subordinate to the user's explicit requirements.\n" + "\n\n".join(pieces)
+        content = MARKER + "\nLatest project conventions replace earlier snapshots; subordinate to the user's explicit requirements.\n" + "\n\n".join(pieces)
         if len(content.encode("utf-8")) > 131072:
             raise ValueError("Combined project instructions exceed 128 KiB")
-        previous = next((m for m in messages if m.get("role") == "system" and str(m.get("content", "")).startswith(MARKER)), None)
-        changed = (previous or {}).get("content") != content if pieces else previous is not None
+        previous = next((m for m in reversed(messages) if m.get("role") == "system" and str(m.get("content", "")).startswith(MARKER)), None)
+        changed = (previous or {}).get("content") != content if pieces or previous is not None else False
         if changed:
-            messages[:] = [m for m in messages if not (m.get("role") == "system" and str(m.get("content", "")).startswith(MARKER))]
-            if pieces:
-                position = next((i for i,m in enumerate(messages) if m.get("role") != "system"), len(messages))
-                messages.insert(position, {"role": "system", "content": content})
+            from fei.state_messages import append_snapshot
+            message = {"role":"system","content":content}
+            if previous is None and not any(m.get('role') in {'assistant','tool'} for m in messages):
+                position = next((i for i,m in enumerate(messages) if m.get('role') != 'system'),len(messages))
+                messages.insert(position,message)
+            else:
+                append_snapshot(messages,message,lambda m:m.get('role')=='system' and str(m.get('content','')).startswith(MARKER))
         return changed

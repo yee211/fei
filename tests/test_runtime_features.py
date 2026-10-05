@@ -43,16 +43,17 @@ class RuntimeFeatureTests(unittest.TestCase):
         (sub / "AGENTS.md").write_text("nested rule", encoding="utf-8")
         manager = ProjectInstructions();messages = [{"role": "user", "content": "goal"}]
         manager.refresh(messages)
-        self.assertIn("root rule", messages[0]["content"])
-        self.assertNotIn("nested rule", messages[0]["content"])
+        self.assertIn("root rule", next(m["content"] for m in reversed(messages) if m["role"] == "system"))
+        self.assertNotIn("nested rule", next(m["content"] for m in reversed(messages) if m["role"] == "system"))
         manager.add_path(sub / "main.py");manager.refresh(messages)
-        self.assertIn("nested rule", messages[0]["content"])
+        self.assertIn("nested rule", next(m["content"] for m in reversed(messages) if m["role"] == "system"))
         (sub / "AGENTS.md").write_text("changed nested instruction", encoding="utf-8")
         manager.refresh(messages)
-        self.assertIn("changed nested", messages[0]["content"])
+        self.assertIn("changed nested", next(m["content"] for m in reversed(messages) if m["role"] == "system"))
         (sub / "AGENTS.md").unlink(); manager.refresh(messages)
-        self.assertNotIn("changed nested", messages[0]["content"])
-        self.assertEqual(len([m for m in messages if m["role"] == "system"]), 1)
+        self.assertNotIn("changed nested", next(m["content"] for m in reversed(messages) if m["role"] == "system"))
+        from fei.state_messages import compact_system_messages
+        self.assertEqual(len(compact_system_messages(messages)), 1)
     def test_outside_instructions_not_loaded(self):
         manager = ProjectInstructions()
         self.assertFalse(manager.add_path(self.root.parent / "outside" / "file.py"))
@@ -66,7 +67,7 @@ class RuntimeFeatureTests(unittest.TestCase):
         with patch.object(loop, "_chat", side_effect=[("", [call], None), ("read rules", [], None)]), patch.object(loop, "_execute") as execute:
             loop.run_task(None, messages, confirm=lambda *args: True)
             execute.assert_not_called()
-        self.assertIn("Use existing style", messages[0]["content"])
+        self.assertIn("Use existing style", next(m["content"] for m in reversed(messages) if m["role"] == "system"))
     def test_finish_requires_real_successful_recent_verification(self):
         state = TaskState()
         with self.assertRaises(ValueError): state.finish("done", [], [], ["fake"], "verified")

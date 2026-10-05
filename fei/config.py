@@ -112,3 +112,16 @@ REQUEST_TIMEOUT = float(os.environ.get("FEI_REQUEST_TIMEOUT", "60"))
 REQUEST_RETRIES = int(os.environ.get("FEI_REQUEST_RETRIES", "2"))
 if REQUEST_TIMEOUT <= 0 or not 0 <= REQUEST_RETRIES <= 5:
     raise ValueError("FEI_REQUEST_TIMEOUT must be positive; FEI_REQUEST_RETRIES must be 0..5")
+
+
+MAX_MODEL_REQUESTS = int(os.environ.get("FEI_MAX_MODEL_REQUESTS", "60"))
+MAX_TASK_TOKENS = int(os.environ.get("FEI_MAX_TASK_TOKENS", "200000"))
+MAX_RESPONSE_TOKENS = int(os.environ.get("FEI_MAX_RESPONSE_TOKENS", "4096"))
+REPEAT_LIMIT = int(os.environ.get("FEI_REPEAT_LIMIT", "3"))
+CONSECUTIVE_ERROR_LIMIT = int(os.environ.get("FEI_CONSECUTIVE_ERROR_LIMIT", "6"))
+if min(MAX_MODEL_REQUESTS, MAX_TASK_TOKENS, MAX_RESPONSE_TOKENS) < 1 or min(REPEAT_LIMIT, CONSECUTIVE_ERROR_LIMIT) < 2:
+    raise ValueError("Runtime budgets must be positive; loop thresholds must be >=2")
+
+MAX_TASK_TOOL_CALLS = int(os.environ.get("FEI_MAX_TASK_TOOL_CALLS", "120"))
+if MAX_TASK_TOOL_CALLS < 1:
+    raise ValueError("FEI_MAX_TASK_TOOL_CALLS must be positive")

@@ -84,3 +84,26 @@ class Session:
         path = self.path.with_suffix(".permissions.jsonl")
         with path.open("a", encoding="utf-8") as target:
             target.write(json.dumps({"time": time.time(), **record}, ensure_ascii=False) + "\n")
+
+
+    @staticmethod
+    def load_latest_task(path):
+        source = Path(path)
+        tasks = source.with_suffix(".tasks.jsonl") if source.suffix == ".jsonl" else source.with_name(source.name.removesuffix(".state.json") + ".tasks.jsonl")
+        if not tasks.is_file():
+            return None
+        # Seek from end: loading status must not scan an entire long session.
+        with tasks.open("rb") as target:
+            target.seek(0, 2)
+            cursor = target.tell()
+            tail = b""
+            while cursor > 0 and len(tail) < 8 * 1024 * 1024:
+                count = min(8192, cursor)
+                cursor -= count
+                target.seek(cursor)
+                tail = target.read(count) + tail
+                lines = tail.rstrip().split(b"\n")
+                if len(lines) > 1 or cursor == 0:
+                    value = json.loads(lines[-1].decode("utf-8")) if lines and lines[-1] else None
+                    return value if isinstance(value, dict) else None
+        raise ValueError("Latest task record exceeds 8 MiB")

@@ -63,6 +63,13 @@ def main():
                 return "Read only inside the evaluation folder"
             if name == "run_bash" and args.get("command") != command:
                 return "Only the exact provided test command is allowed: " + command
+            if name == "delegate_task":
+                from fei.delegation import plan
+                value=plan(**args)
+                if set(map(Path,value["files"])) != allowed:
+                    return "Delegate exactly the fixture implementation files"
+                if value["argv"] != [sys.executable,"-B","-m","unittest","discover","-s",".","-p","test_solution.py","-v"]:
+                    return "Delegate only the exact provided acceptance argv"
             if name == "revert_change": return "Rollback disabled in this evaluation"
         hooks.register("before_tool",guard)
         record={};started=time.monotonic();error=None
@@ -86,9 +93,10 @@ def main():
         compactions=len(record.get("context_compactions",[]))
         navigation=all(any(call["name"]==tool and call["status"]=="ok" for call in calls) for tool in ("list_directory","find_files"))
         project_verified=any(call["name"]=="verify_project" and call["status"]=="ok" for call in calls)
+        delegation=any(c["name"]=="delegate_task" and c["status"]=="ok" for c in calls) and any(child.get("status")=="completed_verified" and any(c["name"]=="run_check" and c["status"]=="ok" for c in child.get("tool_calls",[])) for child in record.get("subagents",[])) and not any(c["name"] in {"write_file","edit_file"} and c["status"]=="ok" for c in calls)
         accepted=record.get("status")=="completed_verified"
-        passed=code_passed and unchanged and accepted and not baseline_passed and (not fixture.get("recovery") or recovery) and (not fixture.get("long_context") or compactions>0) and (not fixture.get("navigation") or navigation) and (not fixture.get("configured_verification") or project_verified)
-        result={"name":case_name,"passed":passed,"baseline_failed":not baseline_passed,"code_tests_passed":code_passed,"completion_accepted":accepted,"protected_files_unchanged":unchanged,"recovery_observed":recovery,"navigation_observed":navigation,"project_verification_observed":project_verified,"context_compactions":compactions,"model_error":error,"elapsed_seconds":round(time.monotonic()-started,2),"tool_calls":len(calls),"tool_errors":sum(c["status"]=="error" for c in calls),"usage":usage,"agent_status":record.get("status"),"test_output":test_output}
+        passed=code_passed and unchanged and accepted and not baseline_passed and (not fixture.get("recovery") or recovery) and (not fixture.get("long_context") or compactions>0) and (not fixture.get("navigation") or navigation) and (not fixture.get("configured_verification") or project_verified) and (not fixture.get("delegation") or delegation)
+        result={"name":case_name,"passed":passed,"baseline_failed":not baseline_passed,"code_tests_passed":code_passed,"completion_accepted":accepted,"protected_files_unchanged":unchanged,"recovery_observed":recovery,"delegation_observed":delegation,"navigation_observed":navigation,"project_verification_observed":project_verified,"context_compactions":compactions,"model_error":error,"elapsed_seconds":round(time.monotonic()-started,2),"tool_calls":len(calls),"tool_errors":sum(c["status"]=="error" for c in calls),"usage":usage,"agent_status":record.get("status"),"test_output":test_output}
         report["cases"].append(result)
         report["passed"]=sum(c["passed"] for c in report["cases"])
         report["completed_cases"]=len(report["cases"])

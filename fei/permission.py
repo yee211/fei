@@ -41,6 +41,14 @@ def permission_request(tool, args) -> str | None:
     name = tool.name
     if tool.source is not None:
         return f"MCP 工具来源：{tool.source}\n参数：{json.dumps(args, ensure_ascii=False)}"
+    if name == "delegate_task":
+        from fei.delegation import plan, description
+        from fei.task_state import current_task
+        value = plan(**args)
+        state = current_task.get()
+        if state is not None:
+            state.delegation_plan = value
+        return description(value)
     if name == "verify_project":
         from fei.project_verify import load_plan, plan_description
         from fei.task_state import current_task
@@ -48,6 +56,12 @@ def permission_request(tool, args) -> str | None:
         task=current_task.get()
         if task is not None:task.verification_plan=plan
         return plan_description(plan)
+    if name == "review_worker":
+        if args.get("decision") == "accept":
+            return None
+        from fei.delegation import worker_record
+        value = worker_record(args["subtask_id"])
+        return "撤销子任务的已记录改动：" + json.dumps(value["handoff"]["changes"], ensure_ascii=False)
     if name == "revert_change":
         from fei.changes import get_change
         record = get_change(args.get("change_id", ""))
@@ -64,7 +78,7 @@ def permission_request(tool, args) -> str | None:
         path = resolve(args.get("path", ".")).resolve()
         if not path.is_relative_to(config.WORKDIR.resolve()):
             return f"访问工作目录外路径：{path}\n参数：{json.dumps(args, ensure_ascii=False)}"
-    if tool.needs_permission or name not in {"read_file", "search_code", "compact_context", "show_changes", "finish_task", "update_plan", "list_directory", "find_files"}:
+    if tool.needs_permission or name not in {"read_file", "search_code", "compact_context", "show_changes", "finish_task", "update_plan", "explore_code", "list_skills", "load_skill", "get_environment", "run_check", "list_directory", "find_files"}:
         return json.dumps(args, ensure_ascii=False)
     return None
 
@@ -117,7 +131,7 @@ class PermissionDecision:
 
 class PermissionPolicy:
     MODES = {"read", "auto", "full"}
-    READ_TOOLS = {"read_file", "search_code", "list_directory", "find_files", "show_changes", "compact_context", "update_plan", "finish_task"}
+    READ_TOOLS = {"read_file", "search_code", "list_directory", "find_files", "show_changes", "compact_context", "update_plan", "finish_task", "explore_code", "list_skills", "load_skill", "get_environment"}
 
     def __init__(self, mode="auto"):
         self.set_mode(mode)

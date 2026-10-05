@@ -17,9 +17,9 @@ fei                      # 或 python -m fei
 ```
 cli.py        接口层：REPL、流式打印
 session.py    会话持久化（~/.fei/sessions/*.jsonl，可恢复）
-permission.py 安全：危险命令硬拦截（唯一闸门）
+approval.py / permission.py 权限模式、会话授权与危险命令守卫
 ──────────────── 以下为核心，与终端 / Web 无关 ────────────────
-loop.py       核心 agent 循环：调模型 → 执行工具 → 结果回填 → 纯文本则结束
+loop.py       核心 agent 循环：模型、工具、预算、任务完成与子任务调度
 context.py    上下文管理：用 API usage 统计 token，请求前检查预算并压缩历史
 tools/        工具注册表（bash / read_file / write_file）
 llm.py        OpenAI 兼容客户端封装（智谱 / DeepSeek / ... 通用）
@@ -36,9 +36,10 @@ tests/        test_context.py 无 API 单测；smoke_e2e.py 真实 API 冒烟
 3. **输出截断**：大工具结果保存全文，上下文仅放 `MAX_TOOL_OUTPUT` 范围内的首尾预览和路径；
    `MAX_TURNS` 防死循环。
 4. **任务内压缩**：每次请求前检查预算，保留原始当前用户请求和最近两个完整消息块；tool_calls/tool 不拆散。参考 API usage，并使用 UTF-8 字节量做保守预估，预估不是精确 token 数。
-5. **安全策略：危险命令拦截与逐次工具确认**：`rm -rf /`、`mkfs`、`dd if=` 等
+5. **安全策略：权限模式与危险命令守卫**：`rm -rf /`、`mkfs`、`dd if=` 等
    命中即拒绝、不交互确认，`FEI_ALLOW_DANGEROUS=1` 可整体关闭。
-   CLI 已注入确认器：写入、编辑、命令和目录外读取逐次确认。
+   `/permission auto` 按目录及会话授权；`read` 限制为只读工具；`full` 免工具确认，危险守卫仍生效。
+   命令使用当前用户的操作系统权限；这些模式不提供操作系统沙箱。
 6. **控制台只显示重要的**：默认只打印最终回答与错误事件（`error`）；
    工具过程仍然全量写入会话 JSONL，要看过程开 `FEI_VERBOSE=1`
    或翻会话文件。核心层照发全部事件，展示策略属于接口层。
@@ -58,8 +59,8 @@ python tests/smoke_e2e.py      # 真实 API：流式 + 工具循环 + 压缩后�
 - [x] **Step 4** 上下文压缩（`context.py`）
 - [x] **Step 5** 流式输出（stream 增量拼装 tool_calls）
 - [x] **Step 6** 权限加固（`permission.py`）
-- [ ] **Step 7 扩展**：把 `run_task` 重构成 `Agent` 类以支持子 agent；
-  slash command / skills；MCP 工具接入；FastAPI 薄壳（`api.py`）
+- [x] **Step 7 扩展**：slash command、skills、MCP、只读探索及受限执行子 agent。
+- [ ] 后续：子任务接收/撤销、执行隔离、真实模型成本基线与中断恢复完善。
 
 ## 加一个新工具的步骤
 
@@ -258,3 +259,93 @@ read 禁止命令、文件修改与外部工具；full 免工具审批，已有�
 审批记录独立保存为会话旁的 .permissions.jsonl，不进入模型上下文，也不用于恢复授权。
 没有审批接口、接口失败或用户取消时，需要审批的操作均拒绝。核心旧 confirm 回调仍兼容。
 Windows 文件工具支持 C:/...、/c/... 和 ~，拒绝含糊的 /Users/... 根相对路径。
+
+## 控制台显示
+
+默认隐藏工具进度、PID、日志路径与计划更新，错误仅显示简短提示；模型回答与最终文字结果正常显示。
+完整工具记录仍保存在会话和命令日志中，`FEI_VERBOSE=1` 显示完整过程。
+
+## 只读 SubAgent 与本地 Skills
+
+`explore_code(question)` 使用同一模型、独立上下文探索代码，主会话只收到结果；问题需包含路径与约束。
+子 Agent 只暴露 read_file/search_code/list_directory/find_files/get_environment，即使 full 也不能写、执行 shell、调用 MCP 或递归委派。
+最多 4 次探索/任务、8 轮模型调用/探索；结果明确标记为发现而非验证证据，子任务记录保存在任务日志，全文由 output_writer 保存。
+子 Agent 继承调用方权限服务和 guard hooks，目录外读取仍按会话策略裁决。初版同步执行，不做后台并行或自动恢复子任务。
+
+`list_skills()` 发现 `.fei/skills/<name>/SKILL.md`；`load_skill(name)` 按需加载纯文本指引，不执行脚本。
+名字限制为字母/数字/下划线/连字符，路径不允许越出技能根目录。单份限 16 KiB，最多 4 份、合计 24 KiB。
+加载后作为独立上下文保留，压缩不改写；会话恢复保留已加载文本。修改技能文件后再次 load_skill 刷新。
+自带 python-check 示例；技能指引服从用户指令、权限与只读边界。
+
+`get_environment()` 提供真实桌面路径（读取 Windows 桌面重定向配置）、主目录、工作目录和 shell。
+桌面任务不再需要用多条命令猜位置；模型提示要求沿用已明确的路径，禁止找不到目录就默默换到工作目录。
+
+## 执行型子 Agent
+
+`delegate_task(task, files, verification_argv, timeout=120)` 串行执行明确实现任务。
+files 是工作区内准确文件列表（最多 20），拒绝目录、隐藏路径和越界符号链接。子 Agent 可读代码、修改授权文件、维护计划，并通过 run_check 执行委派时固定的验收 argv；不能使用任意 shell、MCP 或递归委派。
+验收 argv 直接执行，{python} 替换当前解释器；auto 模式展示完整委派合同并单次确认，full 免确认，read 拒绝。
+文件范围约束作用于文件工具；验收程序使用当前用户权限，可能有副作用，并非沙箱。
+修改直接落盘，返回真实 change_id/diff、验收记录和完成状态；失败后的修改也保留，可用 revert_change 逐条回退。
+主 Agent 需要检查差异并独立验证整体任务，不得把子任务检查 ID 作为主任务证据。子任务最多 16 轮，每个主任务最多 4 个子任务（含探索）。
+
+## 多行任务输入
+
+内置 input() 每次只读取一行，直接粘贴多行会触发多个任务。先输入 `/paste`，粘贴完整任务，再单独输入 `/end`，会保留空行和缩进，一次执行；`/cancel` 或中断不执行。
+也可 `/taskfile examples/worker_task.txt` 从 UTF-8 文件读取完整任务。文本上限 64 KiB。
+执行型子 Agent 示例任务已放在 examples/worker_task.txt，使用独立 worker_demo_case 目录；目录存在时停止，不清空已有文件。
+
+## 任务状态与评测
+
+`/status` 只读显示最近任务、当前计划、子任务状态、记录的修改文件和主任务最近验证；不会请求模型或执行工具。
+/clear 清除状态，/resume 恢复源会话旁的最近任务记录；权限仍重新授权。
+最近验证执行成功不等于最新修改已验收，最终完成状态单独展示。
+真实模型评测从根目录运行 `python -c "import runpy; runpy.run_path('tests/eval_tasks.py', run_name='__main__')"`，新增 delegated_cross_file，共 8 个案例。
+该案例要求子 Agent 完成两个文件修复、返回真实验收记录，父 Agent 不直接修改、独立验证，测试与项目指令保持不变。
+真实模型评测使用已配置外部 API，会发送案例文件内容并产生模型费用，必须显式运行。
+
+本地任务级评测：`python tests/eval_workflows.py`，不调用外部模型。
+覆盖跨文件委派、真实检查失败后修复、越界修改拒绝、父任务独立验证、中断恢复新验证，以及 /status 不调用模型。
+模型决策为预置脚本，文件修改与验收命令实际执行；证明 harness 的执行约束与恢复流程，不代表真实模型任务成功率。
+报告保存在 work/evals/*-workflows/report.json。
+
+## Token 与无效循环控制
+
+单个主任务、探索/执行子 Agent、压缩请求共享：60 次模型请求、200000 累计 token、120 次工具调用。
+请求前按预计输入和最大输出检查余额；有 API usage 时使用实际消耗，无 usage 时保守估算并标记。不是计费硬上限，SDK 内部重试与服务端未返回 usage 的失败请求无法精确计费。
+单次常规模型输出最多 4096 tokens；read_file 默认读取 200 行，更多内容显式分页。
+上下文预算有 API prompt_tokens 时以该值加新增内容的保守估算校准，缺少 usage 时仍使用字节上界；不把所有 UTF-8 字节永久当实际 token。
+同参数、同结果且没有实际修改进展的工具调用：第二次提示换方法，第三次停止；连续 6 次失败也停止。实际文件修改后允许重新验证。
+停止时保留修改和完整调用/结果配对，状态为 loop_detected 或 budget_exceeded，不伪造完成。
+/status 可查看共享消耗。配置项见 .env.example；预算跨子任务共享，但每次用户输入新主任务重新计算。
+
+## 请求前缀与缓存统计
+
+计划、已加载 Skills 和项目规则的更新只追加新快照，不再每轮重写历史前缀；内容不变不新增消息。最新快照覆盖同类旧快照。
+压缩时只保留每类最新快照，建立新的前缀；压缩可能暂时降低缓存命中，但不为命中率保留无用历史。
+工具 schema 按名称稳定排序，主 Agent、探索/执行子 Agent 各自使用固定能力集合。
+共享预算汇总 DeepSeek prompt_cache_hit_tokens/prompt_cache_miss_tokens，兼容 prompt_tokens_details.cached_tokens；/status 显示当前主任务（含子任务和压缩）的命中量和加权命中率。
+服务端未提供缓存字段时显示未知，不当成 0%；统计比例仅覆盖返回缓存字段的请求。实际命中还受服务端缓存建立和淘汰影响。
+
+## 开发验证与安装
+
+需要 Python 3.10 或更新版本。搜索工具需要 PATH 中的 `rg`（ripgrep）；Windows 推荐安装 Git for Windows，让命令工具使用 Git Bash。MCP 是可选依赖：`pip install -e ".[mcp]"`。
+
+```bash
+python -m unittest discover -s tests -p "test_*.py"
+python tests/eval_workflows.py
+python -m pip wheel . --no-deps --wheel-dir dist
+python scripts/check_install.py dist
+```
+
+GitHub Actions 在 Windows/Linux、Python 3.10/3.12 上运行回归、离线任务评估及 wheel 安装检查。检查从工作区外加载已安装包并启动控制台入口，不发送模型请求。离线任务评估使用脚本化模型决策，不能代表真实模型成功率。
+
+`check_install.py` 默认创建独立虚拟环境并安装 wheel 依赖；本地无网络时可加 `--reuse-dependencies`，复用当前解释器的依赖，仅检查包安装和入口。这种方式不能证明依赖可以从零下载安装。
+
+`.fei/skills/` 是项目内技能示例，随 Git 仓库提供；wheel 仅包含 Python 包。通过 wheel 安装后，需要自行在工作区创建技能目录。`.env`、运行日志、备份及手工演示目录不会纳入版本控制。
+
+## 子任务结果审阅
+
+执行子任务返回后，主 Agent 用 `review_worker(subtask_id, decision, reason)` 显式接收或拒绝。接收要求子任务完成且验证通过，文件仍与记录一致；主任务仍需独立验证。拒绝先检查整批修改链，再按逆序恢复原字节或删除该子任务新建的文件。文件被后续修改或路径被重定向时，拒绝覆盖；`/status` 显示 pending/accepted/rejected。
+
+修改仍直接落盘，接收不是合并事务。外部并发写入或 I/O 故障可能使撤销部分完成，错误会保留在审阅记录中；验收命令的副作用不受文件变更记录覆盖。存在待审阅执行子任务时，完成提交必须标记 incomplete；主 Agent 接收或拒绝后才能提交完成。

@@ -95,3 +95,32 @@ def revert_change(change_id):
     record["reverted_at"] = datetime.now(timezone.utc).isoformat()
     save(record)
     return f"Reverted {change_id}: {path}"
+
+
+def validate_batch(change_ids):
+    """Preflight the complete reverse chain before reverting any file."""
+    records = [get_change(ident) for ident in change_ids]
+    if len(set(change_ids)) != len(records):
+        raise ValueError("Duplicate changes in batch")
+    expected = {}
+    for record in reversed(records):
+        if record['status'] != 'applied':
+            raise ValueError("Batch includes a change that is not applied")
+        path = Path(record['path'])
+        if path.is_symlink() or path.resolve() != path:
+            raise RuntimeError("Tracked path was redirected; refusing rollback")
+        current = expected.get(str(path), path.read_bytes() if path.is_file() else None)
+        if current != base64.b64decode(record['after']):
+            raise RuntimeError("File changed after worker edits; refusing entire batch: " + str(path))
+        expected[str(path)] = base64.b64decode(record['before']) if record['before'] is not None else None
+    return records
+
+
+def revert_batch(change_ids):
+    records = validate_batch(change_ids)
+    reverted = []
+    for record in reversed(records):
+        # Recheck on each operation as external processes can race preflight.
+        revert_change(record['id'])
+        reverted.append(record['id'])
+    return reverted

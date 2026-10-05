@@ -19,6 +19,8 @@ REFERENCES["project_navigation_verify"]={
     "shop/checkout.py":"from .pricing import subtotal\ndef total(items,discount_percent=0):\n    return subtotal(items)*(1-discount_percent/100)\n",
 }
 
+REFERENCES["delegated_cross_file"] = REFERENCES["cross_file_checkout"]
+
 class EvaluationSuiteTests(unittest.TestCase):
     def test_all_fixtures_fail_before_and_pass_with_reference(self):
         for fixture in CASES:
@@ -39,9 +41,10 @@ class EvaluationSuiteTests(unittest.TestCase):
         denied={**failed,"result":"Hook denied command"}
         self.assertFalse(MODULE["recovery_observed"]([denied,edit,passed]))
     def test_required_coverage_exists(self):
-        self.assertEqual(len(CASES),7)
+        self.assertEqual(len(CASES),8)
         self.assertTrue(any(len(c["files"])>1 for c in CASES))
         self.assertTrue(any(c.get("long_context") for c in CASES))
         self.assertTrue(any(c.get("recovery") for c in CASES))
+        self.assertTrue(any(c.get("delegation") for c in CASES))
 
 if __name__=="__main__": unittest.main()

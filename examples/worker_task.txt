@@ -1,0 +1,26 @@
+请测试执行型子 Agent，整个文本是同一个任务。
+
+1. 在当前工作目录新建 worker_demo_case。如果它已存在，请报告并停止，不删除、不覆盖已有内容。
+2. 主 Agent 创建 worker_demo_case/calculator.py，准确内容：
+def add(a, b):
+    return a - b
+
+3. 主 Agent 创建 worker_demo_case/test_calculator.py，准确内容：
+import unittest
+from calculator import add
+
+class CalculatorTests(unittest.TestCase):
+    def test_positive(self):
+        self.assertEqual(add(2, 3), 5)
+    def test_negative(self):
+        self.assertEqual(add(-2, -3), -5)
+    def test_zero(self):
+        self.assertEqual(add(0, 0), 0)
+
+4. 初始实现中的减号是故意设置的缺陷。主 Agent 不直接修复它，必须调用 delegate_task：
+- task：修复 add 为正确加法，保持签名，不修改测试。运行固定验收，用 finish_task 提交实际结果。
+- files：["worker_demo_case/calculator.py"]
+- verification_argv：["{python}", "-B", "-m", "unittest", "discover", "-s", "worker_demo_case", "-p", "test_calculator.py", "-v"]
+5. 主 Agent 检查返回 diff，确认只修改 calculator.py，测试文件内容保持原样。
+6. 主 Agent 用 run_bash(purpose="verification") 独立运行同样的验收，再用自己的验证 ID 调用 finish_task。不要把子任务验证 ID 当作主任务证据。
+7. 计划只列实际工作，提交前标记完成；最终回答简洁说明委派、修改和两次验证结果。

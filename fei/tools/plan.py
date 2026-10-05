@@ -20,4 +20,4 @@ def update_plan(steps):
         raise RuntimeError("update_plan requires an active task")
     return task.update_plan(steps)
 
-tool = Tool("update_plan", "Replace the current task plan. Use stable unique step IDs; at most one in_progress step. Revise as findings change; steps=[] clears an obsolete plan. Plan completion is not verification evidence. Unfinished steps require finish_task status=incomplete and a remaining explanation.", PLAN_SCHEMA, update_plan)
+tool = Tool("update_plan", "Replace the current task plan. Use stable unique step IDs; at most one in_progress step. Revise as findings change; steps=[] clears an obsolete plan. List actual work and checks, not finish_task itself. Mark done steps completed before submitting finish_task. Plan completion is not verification evidence. Unfinished steps require finish_task status=incomplete and a remaining explanation.", PLAN_SCHEMA, update_plan)

@@ -13,11 +13,12 @@ from fei.task_state import TaskState, current_task
 from fei.tools._paths import resolve
 
 from fei.config import MAX_TOOL_OUTPUT, MAX_TURNS, MODEL
-from fei.tools import REGISTRY, schemas
+from fei.tools import REGISTRY, schemas, active_tool_names
 from fei.permission import permission_request
 from fei import config
 from fei.context import estimate_tokens, compact_running
 from fei.output import prepare_output
+from fei.runtime_limits import current_budget, TaskBudget, BudgetExceeded, LoopWatch
 
 
 def _chat(client, messages, on_text=None):
@@ -28,7 +29,7 @@ def _chat(client, messages, on_text=None):
     """
     if on_text is None:
         resp = client.chat.completions.create(
-            model=MODEL, messages=messages, tools=schemas(),
+            model=MODEL, messages=messages, tools=schemas(), max_tokens=config.MAX_RESPONSE_TOKENS,
         )
         msg = resp.choices[0].message
         tool_calls = [
@@ -44,7 +45,7 @@ def _chat(client, messages, on_text=None):
     acc: dict = {}  # index -> 工具调用累积器
     usage = None
     stream = client.chat.completions.create(
-        model=MODEL, messages=messages, tools=schemas(),
+        model=MODEL, messages=messages, tools=schemas(), max_tokens=config.MAX_RESPONSE_TOKENS,
         stream=True, stream_options={"include_usage": True},
     )
     for chunk in stream:
@@ -85,7 +86,7 @@ def _execute(tool, args):
 
 def run_task(client, messages, confirm=None, notify=None, on_text=None,
              stats=None, task_record=None, output_writer=None,
-             on_message=None, checkpoint=None, hooks=None, permission_policy=None, on_completion=None) -> str:
+             on_message=None, checkpoint=None, hooks=None, permission_policy=None, on_completion=None, tool_names=None, max_turns=None, delegated_check=None) -> str:
     """Run with lifecycle hooks; legacy observer callbacks remain compatible."""
     active = hooks.copy() if hooks is not None else HookRegistry()
     if notify:
@@ -97,17 +98,38 @@ def run_task(client, messages, confirm=None, notify=None, on_text=None,
     if task_record is not None:
         attach_task_record(active, task_record)
     state = TaskState()
+    state.delegated_check = delegated_check
     state.restore_plan(messages)
+    from fei.skills import restore_skills
+    state.skills = restore_skills(messages)
     state.progress = lambda text: active.emit("notice", kind="progress", text=text)
     active.register("after_tool", state.observe, critical=True)
+    budget = current_budget.get() or TaskBudget()
+    budget_token = current_budget.set(budget)
     token = current_task.set(state)
+    inherited = active_tool_names.get()
+    allowed_names = frozenset(tool_names) if tool_names is not None else inherited
+    if inherited is not None and allowed_names is not None:
+        allowed_names = inherited & allowed_names
+    tools_token = active_tool_names.set(allowed_names)
+    from fei.subagent import explore
+    state.explore_callback = lambda question: explore(client, question, state, confirm, permission_policy, output_writer, active.guards_copy())
+    from fei.delegation import execute
+    state.execute_callback = lambda value: execute(client, value, state, confirm, permission_policy, output_writer, active.guards_copy())
     status, result = "failed", ""
     primary_error = None
     try:
         goal = next((m.get("content", "") for m in reversed(messages) if m.get("role") == "user"), "")
         active.emit("task_start", goal=goal)
         result, status = _run_task(client, messages, active, confirm, on_text,
-                                   stats if stats is not None else {}, output_writer, permission_policy, on_completion)
+                                   stats if stats is not None else {}, output_writer, permission_policy, on_completion, max_turns)
+        return result
+    except BudgetExceeded as exc:
+        status, result = "budget_exceeded", str(exc)
+        messages.append({"role":"assistant", "content":result})
+        active.emit("message", message=messages[-1])
+        active.emit("notice", kind="error", text=result)
+        if on_text: on_text(result)
         return result
     except BaseException as exc:
         primary_error = exc
@@ -116,9 +138,13 @@ def run_task(client, messages, confirm=None, notify=None, on_text=None,
         raise
     finally:
         state.sync_plan(messages)
+        from fei.skills import sync_skills
+        sync_skills(messages, state.skills)
         current_task.reset(token)
+        active_tool_names.reset(tools_token)
+        current_budget.reset(budget_token)
         try:
-            active.emit("task_end", status=status, result=result, completion=state.completion)
+            active.emit("task_end", status=status, result=result, completion=state.completion, subagents=state.subagents, budget=budget.snapshot())
         except Exception as hook_error:
             if primary_error is None:
                 raise
@@ -126,10 +152,13 @@ def run_task(client, messages, confirm=None, notify=None, on_text=None,
                 primary_error.add_note(f"task_end hook also failed: {hook_error}")
 
 
-def _run_task(client, messages, hooks, confirm, on_text, stats, output_writer, permission_policy=None, on_completion=None):
+def _run_task(client, messages, hooks, confirm, on_text, stats, output_writer, permission_policy=None, on_completion=None, max_turns=None):
     instructions = ProjectInstructions()
     state = current_task.get()
     finish_reminders = 0
+    watch = LoopWatch()
+    stop_reason = None
+    stop_status = "loop_detected"
     state.summary_callback = lambda data: hooks.emit("after_summary", phase="compression", **data)
     def append(message):
         messages.append(message)
@@ -162,21 +191,27 @@ def _run_task(client, messages, hooks, confirm, on_text, stats, output_writer, p
         hooks.emit("checkpoint", messages=messages)
         return "成功：已压缩较早记录，保留原始要求、任务备忘和最近完整工具消息块。"
 
-    for turn in range(MAX_TURNS):
+    for turn in range(MAX_TURNS if max_turns is None else max_turns):
         state.sync_plan(messages)
+        from fei.skills import sync_skills
+        sync_skills(messages, state.skills)
         if instructions.refresh(messages):
             notice("instructions", "项目 AGENTS.md 指令已加载或刷新。")
         estimate = estimate_tokens(messages, schemas())
         delta = max(0, estimate - stats.get("request_estimate", estimate))
-        budget = max(estimate, stats.get("prompt_tokens", 0) + delta)
+        budget = stats["prompt_tokens"] + delta if "prompt_tokens" in stats else estimate
         if budget > config.COMPACT_TOKENS:
             compress(turn, budget, "automatic", required=True)
             estimate = estimate_tokens(messages, schemas())
+            budget = estimate
         stats["request_estimate"] = estimate
         hooks.emit("before_model", turn=turn, messages=messages, estimate=estimate)
+        shared_budget = current_budget.get()
+        shared_budget.before_request(budget, config.MAX_RESPONSE_TOKENS)
         started = perf_counter()
         response = _chat(client, messages, on_text=on_text)
         content, tool_calls, usage = response[:3]
+        shared_budget.record(usage, budget, json.dumps(response[:2],ensure_ascii=False) + str(response[3] if len(response)>3 else ""))
         model_metadata = {"reasoning_content": response[3]} if len(response) > 3 and response[3] is not None else {}
         if usage is not None:
             stats["prompt_tokens"] = usage.prompt_tokens
@@ -209,6 +244,9 @@ def _run_task(client, messages, hooks, confirm, on_text, stats, output_writer, p
                 argument_error = None if isinstance(args, dict) else "工具参数必须是 JSON 对象"
             notice("tool", f"{name}({json.dumps(args, ensure_ascii=False)[:160]})")
             tool = REGISTRY.get(name)
+            allowed_names = active_tool_names.get()
+            if allowed_names is not None and name not in allowed_names:
+                tool = None
             if not argument_error and tool is not None:
                 try:
                     if tool.argument_validator is not None:
@@ -219,9 +257,16 @@ def _run_task(client, messages, hooks, confirm, on_text, stats, output_writer, p
                         raise ValueError("finish_task must be the only tool call in its batch")
                 except ValueError as exc:
                     argument_error = str(exc)
+            if not stop_reason:
+                try:
+                    current_budget.get().before_tool()
+                except BudgetExceeded as exc:
+                    stop_reason, stop_status = str(exc), "budget_exceeded"
             error = None
             started = perf_counter()
-            if argument_error:
+            if stop_reason:
+                result = error = "未执行：" + stop_reason
+            elif argument_error:
                 result = error = argument_error
             elif tool is None:
                 result = error = f"未知工具: {name}"
@@ -244,22 +289,27 @@ def _run_task(client, messages, hooks, confirm, on_text, stats, output_writer, p
                         result = error = "权限策略或用户拒绝了本次调用；不得绕过限制，请说明原因。"
                     else:
                         result, error = _execute(tool, args)
-                        if name == "verify_project" and error is None and not getattr(result, "success", False):
+                        if name in {"verify_project", "run_check"} and error is None and not getattr(result, "success", False):
                             error = "One or more configured checks failed or no valid check result was returned"
                         if name == "compact_context" and error is None:
                             pending_compact.append(args.get("reason", ""))
+            if not stop_reason:
+                stop_reason = watch.observe(name,args,result,error)
             check_results=getattr(result,"checks",None)
-            if name in {"run_bash", "verify_project"}:
+            if watch.warning and not stop_reason:
+                result = str(result) + "\n[循环提示] " + watch.warning
+            if name in {"run_bash", "verify_project", "run_check"}:
                 result = (f"[Execution evidence: id={tc['id']}; purpose={args.get('purpose', 'command') if isinstance(args, dict) else 'invalid'}; "
                           f"execution={'failed' if error else 'succeeded'}]\n" + str(result))
             preview, output_path = prepare_output(str(result), writer=output_writer)
             append({"role": "tool", "tool_call_id": tc["id"], "content": preview})
             hooks.emit("after_tool", id=tc["id"], name=name, arguments=args, error=error,
                        result=preview, output_path=output_path, elapsed=perf_counter() - started, turn=turn,
-                       exit_code=0 if name in {"run_bash", "verify_project"} and error is None else None,
+                       exit_code=0 if name in {"run_bash", "verify_project", "run_check"} and error is None else None,
                        checks=check_results)
             notice("error" if error else "result", f"{name}: {str(result)[:120]}")
         state.sync_plan(messages)
+        sync_skills(messages, state.skills)
         if state.completion is not None:
             hooks.emit("checkpoint", messages=messages)
             result = state.render()
@@ -270,6 +320,12 @@ def _run_task(client, messages, hooks, confirm, on_text, stats, output_writer, p
             elif on_text:
                 on_text(result)
             return result, "completed_" + state.completion["status"]
+        if stop_reason:
+            append({"role":"assistant", "content":stop_reason})
+            hooks.emit("checkpoint", messages=messages)
+            notice("error", stop_reason)
+            if on_text: on_text(stop_reason)
+            return stop_reason, stop_status
         if pending_compact:
             # All call/result pairs are complete before changing the context.
             reason = "; ".join(pending_compact)

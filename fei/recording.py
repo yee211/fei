@@ -14,6 +14,10 @@ def attach_task_record(hooks, record):
     def compact(event):
         record.setdefault("context_compactions", []).append({"turn": event.data["turn"], "memory": event.data["memory"]})
     def end(event):
+        if event.data.get("budget"):
+            record["budget"] = event.data["budget"]
+        if event.data.get("subagents"):
+            record["subagents"] = event.data["subagents"]
         if event.data.get("completion") is not None:
             record["completion"] = event.data["completion"]
             record["verification"] = event.data["completion"]["status"]

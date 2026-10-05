@@ -95,10 +95,11 @@ class LongTaskTests(unittest.TestCase):
             def chat(client, active, **kwargs):
                 context.complete_blocks(active)
                 requests.append(copy.deepcopy(active))
-                return responses.pop(0)
+                response = responses.pop(0)
+                return response[:2] + (types.SimpleNamespace(prompt_tokens=context.estimate_tokens(active, loop.schemas())),)
             tool = Tool("probe", "probe", {"type": "object"}, lambda: "failure evidence " + "x" * 6000)
             threshold = context.estimate_tokens(messages, loop.schemas()) + 15000
-            with patch.dict(loop.REGISTRY, {"probe": tool}), patch.object(config, "COMPACT_TOKENS", threshold), patch.object(loop, "_chat", side_effect=chat):
+            with patch.object(config, "REPEAT_LIMIT", 10), patch.dict(loop.REGISTRY, {"probe": tool}), patch.object(config, "COMPACT_TOKENS", threshold), patch.object(loop, "_chat", side_effect=chat):
                 result = loop.run_task(self.client(), messages, confirm=lambda *args: True, task_record=record, on_message=saved.append, checkpoint=saved.save_state, output_writer=saved.store_output)
             saved.save_state(messages)
             self.assertIn("verification", result)

@@ -15,3 +15,11 @@ CASES.append({
     "goal":"This is an unfamiliar small project. FIRST use list_directory to inspect structure and find_files to locate checkout/pricing. Fix subtotal to sum price*quantity and total to apply percentage discount (10 means 10%). Keep public signatures/imports and input items. Use verify_project for configured checks, then finish_task with actual verification ID.",
     "tests":"import unittest\nfrom shop.pricing import subtotal\nfrom shop.checkout import total\nclass Checks(unittest.TestCase):\n    def test_quantity_discount(self):\n        items=[{'price':10,'quantity':3},{'price':5,'quantity':2}]\n        self.assertEqual(subtotal(items),40)\n        self.assertEqual(total(items,10),36)\n        self.assertEqual(items[0]['quantity'],3)\n    def test_empty_full(self):\n        self.assertEqual(total([],50),0)\n        self.assertEqual(total([{'price':4,'quantity':5}],100),0)\n"
 })
+
+
+CASES.append({
+    "name":"delegated_cross_file", "delegation":True,
+    "files":{"pricing.py":"def subtotal(items):\n    return sum(item['price'] for item in items)\n", "checkout.py":"from pricing import subtotal\ndef total(items, discount_percent=0):\n    return subtotal(items)*(1-discount_percent)\n"},
+    "goal":"Must delegate implementation through delegate_task: fix subtotal to sum price*quantity and total to apply discount percentage (10 means 10%). Allowed worker files exactly pricing.py and checkout.py; fixed verification_argv=[{python},-B,-m,unittest,discover,-s,.,-p,test_solution.py,-v]. Parent must not edit implementation directly. Review returned diffs and confirm tests unchanged, independently execute the exact parent verification command, then finish_task with parent evidence IDs. Preserve signatures and do not mutate input items.",
+    "tests":"import unittest\nfrom pricing import subtotal\nfrom checkout import total\nclass Checks(unittest.TestCase):\n    def test_quantity_discount(self):\n        items=[{'price':10,'quantity':3},{'price':5,'quantity':2}]\n        self.assertEqual(subtotal(items),40)\n        self.assertEqual(total(items,10),36)\n        self.assertEqual(items[0]['quantity'],3)\n    def test_empty_full(self):\n        self.assertEqual(total([],50),0)\n        self.assertEqual(total([{'price':4,'quantity':5}],100),0)\n"
+})

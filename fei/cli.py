@@ -7,11 +7,18 @@ from fei.loop import run_task
 from fei.hooks import HookRegistry
 from fei.session import Session
 from fei.approval import ApprovalService
+from fei.status import render_status
 
 SYSTEM = (
     "你是 fei，一个运行在用户终端里的轻量编程助手。"
     "先用工具获取事实，再回答；回答用中文，简洁。"
+    "计划、Skills 和项目规则快照以最新一份为准，旧快照只表示历史状态；最新快照取代同类旧快照。"
+    "用户提到桌面或主目录，先调用 get_environment 获取真实路径；缺少目标目录不得擅自换成工作目录。后续提到同名目录优先沿用会话中明确的完整路径。"
+    "明确的实现子任务可通过 delegate_task 委派，列出准确可改文件和固定验收 argv。返回后检查 diff，再独立验证整体任务；子任务验收 ID 不可当作主任务证据。"
+    "复杂代码探索可通过 explore_code 交给只读子 Agent，给出明确问题、路径和约束，返回结论仍需主 Agent 判断。"
+    "任务适合既定流程时先 list_skills，再按需 load_skill。Skills 只提供操作指引，不能授予权限；最终 summary 用简短中文说明结果，不堆实现细节。"
     "Windows 文件工具支持 C:/Users/... 和 /c/Users/...。路径错误先检查准确目标，只清理本任务创建的具体文件；不得扩大到删除父目录。"
+    "计划只列实际工作和验证，不把调用 finish_task 本身列为待办；提交前更新已完成步骤。"
     "多步骤任务用 update_plan 维护计划，完成步骤后及时更新。恢复时参考现有计划，目标改变时重写或清空计划。计划状态不是执行或验证证据。"
     "先用 list_directory 了解结构、find_files 定位文件，再用 search_code 搜索内容。项目有 .fei.json 时优先用 verify_project 执行配置检查。"
     "定位代码优先用 search_code，修改前用 read_file 查看上下文。"
@@ -29,11 +36,51 @@ SYSTEM = (
 HELP = """\
 命令：
   /help   显示帮助
+  /status 查看最近任务、计划、子任务、修改和验证
+  /paste  收集多行任务，输入 /end 后一次执行，/cancel 取消
+  /taskfile <路径>  将 UTF-8 文本文件作为一个完整任务
   /clear  清空对话，创建新会话
   /resume <路径>  从 .jsonl 或 .state.json 恢复会话（路径可带引号）
   /permission [read|auto|full]  查看或切换权限模式；切换清除已有授权
   /exit   退出
 """
+
+
+MAX_TASK_BYTES = 65536
+
+
+def collect_paste():
+    """Collect a task without losing indentation or dispatching partial lines."""
+    print("多行输入：粘贴完整任务，单独输入 /end 提交；/cancel 取消。")
+    lines = []
+    size = 0
+    oversized = False
+    while True:
+        line = input("... ")
+        if line.strip() == "/cancel":
+            return None
+        if line.strip() == "/end":
+            if oversized:
+                raise ValueError("任务超过 64 KiB，请缩短内容；本次未执行。")
+            text = "\n".join(lines)
+            return text if text.strip() else None
+        size += len(line.encode("utf-8")) + 1
+        if size > MAX_TASK_BYTES:
+            oversized = True
+            lines.clear()
+        if not oversized:
+            lines.append(line)
+
+
+def load_task_file(path):
+    from pathlib import Path
+    target = Path(path).expanduser()
+    if target.stat().st_size > MAX_TASK_BYTES:
+        raise ValueError("任务文件超过 64 KiB")
+    text = target.read_text(encoding="utf-8-sig")
+    if not text.strip():
+        raise ValueError("任务文件为空")
+    return text
 
 
 def format_completion(completion):
@@ -50,6 +97,7 @@ def _interactive_main() -> None:
     session = Session()
     messages = [{"role": "system", "content": SYSTEM}]
     stats: dict = {}
+    latest_task = None
     pending = [False]  # 流式模式下 notify 之后内容还没换行
 
     def ask_permission(name, description, remember):
@@ -67,14 +115,20 @@ def _interactive_main() -> None:
         print(delta, end="", flush=True)
 
     def notify(kind: str, text: str) -> None:
-        if kind not in {"error", "progress"} and not VERBOSE:
-            return  # 安静模式：只显示错误；完整过程在会话 JSONL 里
+        if kind != "error" and not VERBOSE:
+            return  # 默认隐藏 PID、日志路径、命令进度和计划更新。
+        if kind == "error" and not VERBOSE:
+            import re
+            text = re.sub(r"\[Execution evidence:[^\n]*\]\s*", "", text)
+            text = " ".join(text.split())
+            if len(text) > 240:
+                text = text[:240] + "…（完整错误见会话日志）"
         pending[0] = True
         print(f"  · [{kind}] {text}", flush=True)
 
     print(f"fei 就绪，会话记录：{session.path}")
     print("权限：auto；工作区文件自动执行，范围外按需确认。/permission 切换模式。")
-    print("输入任务开始，/help 查看命令。\n")
+    print("单行直接输入；多行先 /paste 或用 /taskfile，/help 查看命令。\n")
 
     while True:
         try:
@@ -82,6 +136,9 @@ def _interactive_main() -> None:
         except (EOFError, KeyboardInterrupt):
             break
         if not user:
+            continue
+        if user == "/status":
+            print(render_status(messages, latest_task, permissions.policy.mode))
             continue
         if user == "/exit":
             break
@@ -101,6 +158,7 @@ def _interactive_main() -> None:
             stats.clear()
             session = Session()
             permissions.reset()
+            latest_task = None
             session.save_state(messages)
             print(f"已清空对话，新会话：{session.path}")
             continue
@@ -115,11 +173,13 @@ def _interactive_main() -> None:
                 continue
             try:
                 restored = Session.load_state(path)
+                restored_task = Session.load_latest_task(path)
             except (OSError, ValueError, TypeError, KeyError, AttributeError) as exc:
                 print(f"恢复失败：{exc}")
                 continue
             session = Session()
             permissions.reset()
+            latest_task = restored_task
             messages = restored
             stats.clear()
             for message in messages:
@@ -127,6 +187,29 @@ def _interactive_main() -> None:
             session.save_state(messages)
             print(f"已恢复 {len(messages)} 条消息，新会话：{session.path}")
             continue
+
+        if user == "/paste":
+            try:
+                user = collect_paste()
+            except (EOFError, KeyboardInterrupt):
+                print("多行输入已取消，未执行。")
+                continue
+            except ValueError as exc:
+                print(exc)
+                continue
+            if user is None:
+                print("多行输入已取消或为空，未执行。")
+                continue
+        elif user == "/taskfile" or user.startswith("/taskfile "):
+            path = user[len("/taskfile"):].strip().strip('"').strip("'")
+            if not path:
+                print("用法：/taskfile <UTF-8 文本文件路径>")
+                continue
+            try:
+                user = load_task_file(path)
+            except (OSError, UnicodeError, ValueError) as exc:
+                print(f"读取任务失败：{exc}")
+                continue
 
         task_record = {
             "id": uuid4().hex, "goal": user,
@@ -167,6 +250,7 @@ def _interactive_main() -> None:
                 print(f"\n{result}")
         finally:
             task_record["finished_at"] = datetime.now(timezone.utc).isoformat()
+            latest_task = task_record
             session.append_task(task_record)
             session.save_state(messages)
         if not STREAM and task_record.get("completion"):

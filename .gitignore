@@ -16,3 +16,9 @@ work/
 !.env.example
 *.log
 .pytest_cache/
+
+# Manual worker fixtures and packaging output
+/worker_demo/
+/worker_demo_case/
+/build/
+/dist/

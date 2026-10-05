@@ -40,6 +40,11 @@ class HookRegistry:
         copied.errors = self.errors
         return copied
 
+    def guards_copy(self):
+        copied = HookRegistry(self.on_error)
+        copied._handlers = {name: list(entries) if name in GUARDS else [] for name, entries in self._handlers.items()}
+        return copied
+
     def emit(self, name, /, **data):
         if name not in EVENTS:
             raise ValueError(f"Unknown hook: {name}")
